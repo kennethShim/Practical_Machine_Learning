@@ -1,0 +1,153 @@
+---
+title: "Classifying the Quality of a Weight Lifting Acitivity"
+author: "A Coursera Student"
+date: "December 27, 2015"
+output: html_document
+---
+
+<br><br>
+<h4><b><u>Background</u></b></h4>
+As displayed here, the raw training data consists 19,622 observations where each observation is composed of 160 features/covariates. Six Partipants were asked to perform the Unilateral Dubbell Biceps Curl in five different ways. Our task was to build a predictive model that can accurately classify the five ways in which the dubbell biceps curl was performed based on a given set of features. 
+```{r, echo=FALSE,message=FALSE}
+library(caret)
+library(corrplot)
+```
+
+```{r, echo=TRUE}
+rawData <- read.csv(file='./data/pml-training.csv', na.strings=c(""," ","NA"))
+dim(rawData); table(rawData$classe); table(rawData$user_name)
+```
+
+<br><br>
+<h4><b><u>Data Cleaning and Preprocessing</u></b></h4>
+The main aim of the data cleaning was to remove any unneccessary covariates as many as possible to build a robust and efficient model with minimum level of noise and overfitting.  First, the covariates that are nearly entirely filled by 'NA' or '' were removed to avoid any unnecessary data imputation that can only lead to worsening of bias and variance.
+```{r}
+covNames <- names(rawData)
+cov_na <- colSums(is.na(rawData)) >= ceiling(dim(rawData)[1] * 0.8)
+rawData_adj <- rawData[, !cov_na]
+```
+Afterwards, the remaining covariates were evaluated in order to remove any covariates with near zero variabilities that would not contribute much in building a predictive model.  
+```{r}
+nsv <- nearZeroVar(rawData_adj, saveMetrics=TRUE)
+#names(rawData_adj)[nsv$nzv==TRUE]
+rawData_adj <- rawData_adj[,!nsv$nzv==TRUE]
+```
+
+In addition, the covariates for the user name, timestamps, and record index were removed because of their irrelavance to the outcome feature.
+```{r}
+cov_drop <- c("X", "user_name", "cvtd_timestamp")
+rawData_cleaned <- rawData_adj[ , !(names(rawData_adj)) %in% cov_drop]
+covariates_kept <- names(rawData_cleaned)
+```
+
+The remaining covariates at this point were then centered and scaled based on their respective covariate mean and standard deviation so that the model's prediction is not biased by covariates with values that deviates in quantity unit relative to the quantity unit of the other covariates.
+```{r}
+preObj <- preProcess(rawData_cleaned[,-57], method=c("center", "scale"))
+rawData_cleaned <- predict(preObj, rawData_cleaned)
+```
+
+Further, a paired correlation plot was generated with the remaining covariates to check if there exists any covariates with high level of correlation. Here, a pair of covariates with correlation value equal to or greater than 0.9 was considered as a high level.  
+```{r}
+M <- abs(cor(as.data.frame(lapply(rawData_cleaned[,-57], as.numeric))))
+diag(M) <- 0
+which(M > 0.9, arr.ind=T)
+corrplot(M, method="circle")
+```
+<p>As indicated by the large and dark blue circles in the plot, there exist many covariates with high levels of correlations.  This meant that the dimension of the current dataset could be further reduced with PCA (Principle Component Analysis).  The parameter of the PCA was set so to reduce the dimentionality while retaining the 98% of the variance existing in the dataset.</p>
+
+```{r}
+set.seed(1111)
+preProc <- preProcess(rawData_cleaned[,-57], method="pca", thresh=0.98)
+preProc$numComp
+rawData_cleaned <- predict(preProc, rawData_cleaned)
+```
+
+After the completion of data cleaning and preprocessing procedure, there were approximately 80% reduction in the initial feature dimension. Here is the dimension of the dataset including the outcome feature.
+```{r}
+dim(rawData_cleaned)[2]
+```
+
+<br><br>
+<h4><b><u>Training and Testing</u></b></h4>
+The cleaned dataset was split into two partitions, training and testing datasets.  Here, 75% of the cleaned dataset was distributed to the training dataset while the remaining 25% was used as the test dataset.
+```{r}
+inTrain <- createDataPartition(y=rawData_cleaned$classe,
+                               p=0.75, list=F)
+trainSet <- rawData_cleaned[inTrain,]
+testSet <- rawData_cleaned[-inTrain,]
+```
+The obtained trainSet was used to build a predictive model using <em>BAGGING (Bootstrap Aggregating)</em> with inference regression trees. In general, the BAGGING uses bootstrap sampling method (sampling with replacement) to build multiple models based on different training datasets. A final classified output is based on majority voting of the multiple outputs resulting from the multiple predictive models.
+```{r, message=FALSE, warning=FALSE}
+X<-subset(trainSet, select=-c(classe))
+Y<-trainSet$classe
+treebag <- bag(X,Y,B=20,
+               bagControl=bagControl(
+                 fit=ctreeBag$fit, 
+                 predict=ctreeBag$pred, 
+                 aggregate=ctreeBag$aggregate
+               )
+)
+```
+The built model was used on the pseudo-test dataset to get a basic out of sample error estimate. The observed accuracy is shown here.
+```{r}
+predicted <- predict(treebag, subset(testSet, select=-c(classe)))
+t = table(predicted == testSet$classe)
+as.numeric( t[2]/sum(t) )
+```
+
+Further, 10-fold cross-validation was used to get a better out of sample error estimate with an averaged performance measurement of the models built with different subsets of the training dataset.
+```{r}
+K=10
+folds <- createFolds(testSet$classe, k=K, list=TRUE, returnTrain=FALSE)
+miss_class <- rep(-1, K)
+
+for (i in 1:K) {
+  #obtain train and test set
+  trSet <- testSet[-folds[[i]], ]
+  ttSet <- testSet[folds[[i]], ]
+  
+  #fit a model
+  x<-subset(trSet, select=-c(classe))
+  y<-trSet$classe
+  fitModel_bag <- bag(x,y,B=20,
+                    bagControl=bagControl(
+                    fit=ctreeBag$fit, 
+                    predict=ctreeBag$pred, 
+                    aggregate=ctreeBag$aggregate
+                  )
+  )
+  
+  #test the model
+  true_output <- ttSet$classe
+  ttSet <- subset(ttSet, select=-c(classe))
+  modelPre <- predict(fitModel_bag, newdata=ttSet)
+  
+  #record misclassification rate
+  ms <- sum((true_output == modelPre)*1)/length(modelPre)
+  miss_class[i] <- ms
+  
+  as.character(ms)
+}
+sum(miss_class)/length(miss_class)
+```
+
+As shown, the resulted <em>expected out of sample error rate</em> from the k-fold cross-validation was lower than the value previously observed above.  However, it was still in an acceptable range.
+
+<br><br>
+<h4><b><u>Predicting the New Dataset</u></b></h4>
+Finally, the built model was used to predict the given 20 test cases.  The same PCA object and scale & center object used in the training procedure was applied to the new case in order to ensure no contamination.  
+```{r}
+#Loading the raw data
+testData_raw <- read.csv(file='./data/pml-testing.csv', na.strings=c(""," ","NA"))
+dim(testData_raw)
+
+testData_raw <- subset(testData_raw, select=covariates_kept[-56])
+#scaled
+testData_cleaned <- predict(preObj, testData_raw)
+#PCA
+testData_cleaned <- predict(preProc, testData_cleaned)
+
+#Predict
+predict(treebag, testData_cleaned)
+```
+When the result was submitted to the course website for validation, the classified outputs were correct 19 out 20 times.
